@@ -199,7 +199,7 @@ if __name__ == "__main__":
             else:
                 cv2.namedWindow(basename, cv2.WINDOW_NORMAL)
                 cv2.imshow(basename, vis_frame)
-                if cv2.waitKey(1) == 27:
+                if cv2.waitKey(0) == 27:
                     break  # esc to quit
         video.release()
         if args.output:

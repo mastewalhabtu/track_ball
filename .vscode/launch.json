@@ -5,6 +5,28 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python: ball_inferer.py with retinanet",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/icog/yared/track_ball/ball_inferer.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--config-name",
+                "COCO-Detection/retinanet_R_101_FPN_3x.yaml",
+                "--video-input",
+                "../data/selected_videos/1.mp4",
+                "--output",
+                "../data/results/ball_tunes/",
+                "--opts",
+                "MODEL.WEIGHTS",
+                "../data/ball_output/COCO-Detection/retinanet_R_101_FPN_3x_lr0.0002_iter1000/model_final.pth",
+                "SOLVER.MAX_ITER",
+                "1000",
+                "SOLVER.BASE_LR",
+                "0.0002"
+            ]
+        },
+        {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
@@ -12,7 +34,7 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "Python: ball_inferer.py File",
+            "name": "Python: ball_inferer.py with mask_rcnn",
             "type": "python",
             "request": "launch",
             "program": "${file}",

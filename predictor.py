@@ -11,6 +11,8 @@ from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
 from detectron2.utils.visualizer import ColorMode, Visualizer
 
+WINDOW_NAME = 'predictor test'
+
 
 class VisualizationDemo(object):
     def __init__(self, cfg, instance_mode=ColorMode.IMAGE, parallel=False):
@@ -49,7 +51,8 @@ class VisualizationDemo(object):
         predictions = self.predictor(image)
         # Convert image from OpenCV BGR format to Matplotlib RGB format.
         image = image[:, :, ::-1]
-        visualizer = Visualizer(image, self.metadata, instance_mode=self.instance_mode)
+        visualizer = Visualizer(image, self.metadata,
+                                instance_mode=self.instance_mode)
         if "panoptic_seg" in predictions:
             panoptic_seg, segments_info = predictions["panoptic_seg"]
             vis_output = visualizer.draw_panoptic_seg_predictions(
@@ -62,7 +65,8 @@ class VisualizationDemo(object):
                 )
             if "instances" in predictions:
                 instances = predictions["instances"].to(self.cpu_device)
-                vis_output = visualizer.draw_instance_predictions(predictions=instances)
+                vis_output = visualizer.draw_instance_predictions(
+                    predictions=instances)
 
         return predictions, vis_output
 
@@ -96,10 +100,12 @@ class VisualizationDemo(object):
                 )
             elif "instances" in predictions:
                 predictions = predictions["instances"].to(self.cpu_device)
-                vis_frame = video_visualizer.draw_instance_predictions(frame, predictions)
+                vis_frame = video_visualizer.draw_instance_predictions(
+                    frame, predictions)
             elif "sem_seg" in predictions:
                 vis_frame = video_visualizer.draw_sem_seg(
-                    frame, predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
+                    frame, predictions["sem_seg"].argmax(
+                        dim=0).to(self.cpu_device)
                 )
 
             # Converts Matplotlib RGB format to OpenCV BGR format
@@ -126,8 +132,99 @@ class VisualizationDemo(object):
                 predictions = self.predictor.get()
                 yield process_predictions(frame, predictions)
         else:
+            counts = {
+                'frames': 0,
+                'normal_way': 0,
+                'candidate_way': 0,
+            }
+            prev_prediction = None
+            orig_img_size = None
             for frame in frame_gen:
-                yield process_predictions(frame, self.predictor(frame))
+                counts['frames'] += 1
+                orig_img_size = frame.shape[:2]
+                prediction = self.predictor(frame)
+                # print("prediction: ", prediction)
+                if len(prediction['instances']) > 0:  # found a ball
+                    counts['normal_way'] += 1
+                    prev_prediction = prediction    # update prediction for next iteration
+                    yield process_predictions(frame, prediction)
+                elif prev_prediction is not None:
+                    candidate_crop, new_origin = self.getBallProposal(
+                        frame, prev_prediction['instances'])
+
+                    candidate_prediction = self.predictor(candidate_crop)
+                    # print('candidate prediction: ', candidate_prediction)
+                    vis_frame = process_predictions(
+                        candidate_crop, candidate_prediction)
+
+                    # cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+                    # cv2.imshow(WINDOW_NAME, vis_frame)
+                    # if cv2.waitKey(0) == 27:
+                    #     break  # esc to quit
+
+                    if len(candidate_prediction['instances']) > 0:
+                        counts['candidate_way'] += 1
+
+                        # transform prediction coordinates to original image
+                        self.transform_prediction(
+                            candidate_prediction, new_origin, orig_img_size)
+                        prev_prediction = candidate_prediction  # update prediction for next iteration
+
+                    # to enable generator continuation only
+                    yield process_predictions(frame, prediction)
+                else:   # haven't seen a ball yet
+                    yield process_predictions(frame, prediction)
+            print('counts: ', counts)
+
+    def getBallProposal(self, img, prev_instances):
+        y_widen = 0.1
+        x_widen = 0.1
+
+        prev_boxes = prev_instances.pred_boxes
+        img_h, img_w = prev_instances.image_size
+        np_prev_boxes = prev_boxes.to(self.cpu_device).tensor.numpy()
+
+        prev_box = np_prev_boxes[0]
+
+        # change box points to integers
+        x0, y0, x1, y1 = map(lambda real: int(round(real)), prev_box)
+        assert y1 > y0, "Box y1 is not greater than y0"
+        assert x1 > x0, "Box x1 is not greater than x0"
+
+        h, w = y1 - y0, x1 - x0
+
+        h_fract = int(round(y_widen * img_h))
+        w_fract = int(round(x_widen * img_w))
+
+        y0 = y0 - h_fract if y0 > h_fract else 0
+        x0 = x0 - w_fract if x0 > w_fract else 0
+        h = h + 2*h_fract   # 2* because to compensate y0 - h_fract effect
+        w = w + 2*w_fract
+
+        # ! don't need to check if w and h get out of image limit since python indexing is safe
+        # check if w and h doesnot get out of image limit
+        # h = img_h - y0 if h > img_h - y0 else h
+        # w = img_w - x0 if w > img_w - x0 else w
+
+        if len(img.shape) <= 3:
+            return img[y0: y0 + h, x0: x0 + w], (x0, y0)
+        else:
+            return img[
+                ..., y0: y0 + h, x0: x0 + w, :
+            ], (x0, y0)
+
+    def transform_prediction(self, pred, origin, orig_img_size):
+        x0, y0 = origin
+        boxes = pred['instances'].pred_boxes
+
+        # works for multpile boxes
+        boxes.tensor += torch.tensor([x0, y0, x0, y0],
+                                     dtype=boxes.tensor.dtype, device=boxes.tensor.device)
+        orig_h, orig_w = orig_img_size
+        box_limit = torch.tensor([orig_w, orig_h, orig_w, orig_h],
+                                 dtype=boxes.tensor.dtype, device=boxes.tensor.device)
+        assert (boxes.tensor <= box_limit).all(
+        ), "Transforming prediction boxes is making boxes point out of original image size"
 
 
 class AsyncPredictor:
@@ -171,9 +268,11 @@ class AsyncPredictor:
         for gpuid in range(max(num_gpus, 1)):
             cfg = cfg.clone()
             cfg.defrost()
-            cfg.MODEL.DEVICE = "cuda:{}".format(gpuid) if num_gpus > 0 else "cpu"
+            cfg.MODEL.DEVICE = "cuda:{}".format(
+                gpuid) if num_gpus > 0 else "cpu"
             self.procs.append(
-                AsyncPredictor._PredictWorker(cfg, self.task_queue, self.result_queue)
+                AsyncPredictor._PredictWorker(
+                    cfg, self.task_queue, self.result_queue)
             )
 
         self.put_idx = 0

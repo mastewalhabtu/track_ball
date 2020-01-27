@@ -9,8 +9,8 @@ COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml
 COCO-InstanceSegmentation/mask_rcnn_R_101_C4_3x.yaml
 "
 
-lrs=(0.02 0.002)
-iters=(125 150 175 200)
+lrs=(0.02 0.002 0.0002)
+iters=(500 1000)
 
 m="COCO-Detection/retinanet_R_101_FPN_3x.yaml"  # specific model
 
