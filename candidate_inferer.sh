@@ -22,5 +22,5 @@ do
     echo "..........................."
     no_yaml_m=$(cut -d '.' -f 1 <<< $m)   # remove .extenstion from string
     w="../data/ball_output/${no_yaml_m}_lr${l}_iter${i}/model_final.pth" # finetuned model weight path
-    python ball_inferer.py --config-name $m --video-input $v --output ../data/results/ball_tunes/ --opts MODEL.WEIGHTS $w SOLVER.MAX_ITER $i SOLVER.BASE_LR $l
+    python ball_inferer.py --config-name $m --video-input $v --output ../data/results/ball_tunes_thresh0.25/ --confidence-threshold 0.25 --opts MODEL.WEIGHTS $w SOLVER.MAX_ITER $i SOLVER.BASE_LR $l
 done

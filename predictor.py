@@ -139,6 +139,8 @@ class VisualizationDemo(object):
             }
             prev_prediction = None
             orig_img_size = None
+            instance_index = None
+            prev_center = None
             for frame in frame_gen:
                 counts['frames'] += 1
                 orig_img_size = frame.shape[:2]
@@ -146,7 +148,13 @@ class VisualizationDemo(object):
                 # print("prediction: ", prediction)
                 if len(prediction['instances']) > 0:  # found a ball
                     counts['normal_way'] += 1
+
+                    instance = self.get_prominent_instance(prediction['instances'], prev_center)
+                    prediction['instances'] = instance
+
+                    prev_center = instance.pred_boxes[0].get_centers()
                     prev_prediction = prediction    # update prediction for next iteration
+
                     yield process_predictions(frame, prediction)
                 elif prev_prediction is not None:
                     candidate_crop, new_origin = self.getBallProposal(
@@ -165,17 +173,60 @@ class VisualizationDemo(object):
                     if len(candidate_prediction['instances']) > 0:
                         counts['candidate_way'] += 1
 
+                        instance = self.get_prominent_instance(candidate_prediction['instances'], prev_center)
+                        candidate_prediction['instances'] = instance
+
                         # transform prediction coordinates to original image
                         self.transform_prediction(
                             candidate_prediction, new_origin, orig_img_size)
+                        prev_center = instance.pred_boxes[0].get_centers()
                         prev_prediction = candidate_prediction  # update prediction for next iteration
 
-                    # to enable generator continuation only
-                    yield process_predictions(frame, prediction)
+                        yield process_predictions(frame, candidate_prediction)
+                    else:
+                    #     prev_prediction = None
+
+                        # to enable generator continuation only
+                        yield process_predictions(frame, prediction)
                 else:   # haven't seen a ball yet
                     yield process_predictions(frame, prediction)
             print('counts: ', counts)
 
+    def widen_box(self, box, size_limit):
+        y_widen = 0.1
+        x_widen = 0.1
+        
+    def get_box(self, center, box_size):
+        pass
+
+    def get_prominent_instance(self, pred_instances, prev_center):
+        instances_len =  len(pred_instances)
+        if instances_len == 1:
+            return pred_instances
+
+        if prev_center is None:
+            max_score = pred_instances.scores[0]
+            max_index = 0
+            for i in range(1, instances_len):
+                if max_score < pred_instances.scores[i]:
+                    max_score = pred_instances.scores[i]
+                    max_index = i
+
+            return pred_instances[max_index:max_index+1] # instances only support slicing not indexing, weird
+
+        min_dist = torch.dist(prev_center, pred_instances.pred_boxes[0].get_centers())
+        min_index = 0
+        for i in range(1, instances_len):
+            dist = torch.dist(prev_center, pred_instances.pred_boxes[i].get_centers())
+            if dist < min_dist:
+                min_dist = dist
+                min_index = i
+
+        return pred_instances[min_index:min_index+1] # instances only support slicing not indexing, weird
+
+    def get_dist(point1, point2):
+        return torch.dist(point1, point2)
+    
     def getBallProposal(self, img, prev_instances):
         y_widen = 0.1
         x_widen = 0.1
@@ -213,6 +264,7 @@ class VisualizationDemo(object):
                 ..., y0: y0 + h, x0: x0 + w, :
             ], (x0, y0)
 
+
     def transform_prediction(self, pred, origin, orig_img_size):
         x0, y0 = origin
         boxes = pred['instances'].pred_boxes
@@ -225,6 +277,8 @@ class VisualizationDemo(object):
                                  dtype=boxes.tensor.dtype, device=boxes.tensor.device)
         assert (boxes.tensor <= box_limit).all(
         ), "Transforming prediction boxes is making boxes point out of original image size"
+
+
 
 
 class AsyncPredictor:
