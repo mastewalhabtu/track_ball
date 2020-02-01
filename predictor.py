@@ -138,9 +138,10 @@ class VisualizationDemo(object):
                 'candidate_way': 0,
             }
             prev_prediction = None
+            prev_center = None
+            prev_size = None
             orig_img_size = None
             instance_index = None
-            prev_center = None
             for frame in frame_gen:
                 counts['frames'] += 1
                 orig_img_size = frame.shape[:2]
@@ -149,11 +150,12 @@ class VisualizationDemo(object):
                 if len(prediction['instances']) > 0:  # found a ball
                     counts['normal_way'] += 1
 
-                    instance = self.get_prominent_instance(prediction['instances'], prev_center)
-                    prediction['instances'] = instance
+                    instance = self.set_prominent_instance(
+                        prediction, prev_center)
 
-                    prev_center = instance.pred_boxes[0].get_centers()
-                    prev_prediction = prediction    # update prediction for next iteration
+                    # update prediction for next iteration
+                    prev_center, prev_size, prev_prediction = self.get_next_data(
+                        prediction)
 
                     yield process_predictions(frame, prediction)
                 elif prev_prediction is not None:
@@ -173,36 +175,58 @@ class VisualizationDemo(object):
                     if len(candidate_prediction['instances']) > 0:
                         counts['candidate_way'] += 1
 
-                        instance = self.get_prominent_instance(candidate_prediction['instances'], prev_center)
-                        candidate_prediction['instances'] = instance
+                        instance = self.set_prominent_instance(
+                            candidate_prediction, prev_center)
 
                         # transform prediction coordinates to original image
                         self.transform_prediction(
                             candidate_prediction, new_origin, orig_img_size)
-                        prev_center = instance.pred_boxes[0].get_centers()
-                        prev_prediction = candidate_prediction  # update prediction for next iteration
+
+                        
+
+                        # update prediction for next iteration
+                        prev_center, prev_size, prev_prediction = self.get_next_data(
+                            candidate_prediction)
 
                         yield process_predictions(frame, candidate_prediction)
                     else:
-                    #     prev_prediction = None
+                        #     prev_prediction = None
 
-                        # to enable generator continuation only
+                        # to enable generator continuation with no prediction instance result
                         yield process_predictions(frame, prediction)
                 else:   # haven't seen a ball yet
                     yield process_predictions(frame, prediction)
             print('counts: ', counts)
 
-    def widen_box(self, box, size_limit):
-        y_widen = 0.1
-        x_widen = 0.1
-        
-    def get_box(self, center, box_size):
-        pass
+    def get_box_size(self, box):
+        # change box points to integers
+        x0, y0, x1, y1 = map(lambda real: int(round(real)), prev_box)
+        assert y1 > y0, "Box y1 is not greater than y0"
+        assert x1 > x0, "Box x1 is not greater than x0"
 
-    def get_prominent_instance(self, pred_instances, prev_center):
-        instances_len =  len(pred_instances)
-        if instances_len == 1:
-            return pred_instances
+        h, w = y1 - y0, x1 - x0
+
+        return h, w
+
+    def get_next_data(self, prediction):
+        instance = prediction['instances']
+        assert len(instance) == 1
+        return instance.pred_boxes[0].get_centers(), self.get_box_size(instance.pred_boxes[0]), prediction
+
+    def normalize_box_size(self, prev_size, instance):
+        prev_h, prev_w = prev_size
+        h, w = self.get_box_size(instance.pred_boxes[0])
+
+        score = instance.pred_scores[0]
+
+        new_h = prev_h * (1 - score) + h * score
+        new_w = prev_w * (1 - score) + w * score
+
+        return new_h, new_w
+
+    def set_prominent_instance(self, prediction, prev_center, prev_size, alone_score=0.5):
+        instances_len = len(pred_instances)
+        pred_instances = prediction['instances']
 
         if prev_center is None:
             max_score = pred_instances.scores[0]
@@ -212,24 +236,45 @@ class VisualizationDemo(object):
                     max_score = pred_instances.scores[i]
                     max_index = i
 
-            return pred_instances[max_index:max_index+1] # instances only support slicing not indexing, weird
+            # if no previous prediction can support it with vicinity, expect a high score
+            if max_score > alone_score:
+                # instances only support slicing not indexing, weird
+                prominent_instance = pred_instances[max_index:max_index+1]
+            else:
+                # empty instances
+                prominent_instance = pred_instances[instances_len+1:]
+        else:
+            min_dist = torch.dist(
+                prev_center, pred_instances.pred_boxes[0].get_centers())
+            min_index = 0
+            for i in range(1, instances_len):
+                dist = torch.dist(
+                    prev_center, pred_instances.pred_boxes[i].get_centers())
+                if dist < min_dist:
+                    min_dist = dist
+                    min_index = i
 
-        min_dist = torch.dist(prev_center, pred_instances.pred_boxes[0].get_centers())
-        min_index = 0
-        for i in range(1, instances_len):
-            dist = torch.dist(prev_center, pred_instances.pred_boxes[i].get_centers())
-            if dist < min_dist:
-                min_dist = dist
-                min_index = i
+            assert prev_size is not None  # if prev_center is not None, then so prev_size too
+            h, w = prev_size
+            # if min_dist is out of twice circumscribing circle of previous rectangle don't consider vicinity
+            if min_dist > 2*max(h, w):
+                # empty instances
+                prominent_instance = pred_instances[instances_len+1:]
+            else:
+                # instances only support slicing not indexing, weird
+                prominent_instance = pred_instances[min_index:min_index+1]
 
-        return pred_instances[min_index:min_index+1] # instances only support slicing not indexing, weird
+        # update prediction instances
+        prediction['instances'] = prominent_instance
+
+        return prominent_instance
 
     def get_dist(point1, point2):
         return torch.dist(point1, point2)
-    
-    def getBallProposal(self, img, prev_instances):
-        y_widen = 0.1
-        x_widen = 0.1
+
+    def getBallProposal(self, img, prev_instances, scale=0.1):
+        y_widen = scale
+        x_widen = scale
 
         prev_boxes = prev_instances.pred_boxes
         img_h, img_w = prev_instances.image_size
@@ -237,12 +282,7 @@ class VisualizationDemo(object):
 
         prev_box = np_prev_boxes[0]
 
-        # change box points to integers
-        x0, y0, x1, y1 = map(lambda real: int(round(real)), prev_box)
-        assert y1 > y0, "Box y1 is not greater than y0"
-        assert x1 > x0, "Box x1 is not greater than x0"
-
-        h, w = y1 - y0, x1 - x0
+        h, w = self.get_box_size(prev_box)
 
         h_fract = int(round(y_widen * img_h))
         w_fract = int(round(x_widen * img_w))
@@ -264,7 +304,6 @@ class VisualizationDemo(object):
                 ..., y0: y0 + h, x0: x0 + w, :
             ], (x0, y0)
 
-
     def transform_prediction(self, pred, origin, orig_img_size):
         x0, y0 = origin
         boxes = pred['instances'].pred_boxes
@@ -277,8 +316,6 @@ class VisualizationDemo(object):
                                  dtype=boxes.tensor.dtype, device=boxes.tensor.device)
         assert (boxes.tensor <= box_limit).all(
         ), "Transforming prediction boxes is making boxes point out of original image size"
-
-
 
 
 class AsyncPredictor:
