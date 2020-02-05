@@ -10,6 +10,7 @@ from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
 from detectron2.utils.visualizer import ColorMode, Visualizer
+from detectron2.structures import Instances
 
 WINDOW_NAME = 'predictor test'
 
@@ -140,49 +141,36 @@ class VisualizationDemo(object):
             prev_prediction = None
             prev_center = None
             prev_size = None
-            orig_img_size = None
-            instance_index = None
             for frame in frame_gen:
                 counts['frames'] += 1
-                orig_img_size = frame.shape[:2]
+
+                # predict in normal way
                 prediction = self.predictor(frame)
-                # print("prediction: ", prediction)
-                if len(prediction['instances']) > 0:  # found a ball
+
+                # try to get prominent instace
+                instance = self.get_prominent_instance(
+                    prediction, prev_center, prev_size)
+
+                if instance is not None:  # found a ball
+                    # print("prediction: ", prediction)
                     counts['normal_way'] += 1
 
-                    instance = self.set_prominent_instance(
-                        prediction, prev_center)
+                    # set only prominent instance
+                    prediction['instances'] = instance
 
                     # update prediction for next iteration
                     prev_center, prev_size, prev_prediction = self.get_next_data(
                         prediction)
 
                     yield process_predictions(frame, prediction)
-                elif prev_prediction is not None:
-                    candidate_crop, new_origin = self.getBallProposal(
-                        frame, prev_prediction['instances'])
+                elif prev_prediction is not None:   # there exists previous prediction
+                    candidate_prediction = self.setProminentInstanceByProposal(
+                        frame, prev_prediction['instances'], prev_center, prev_size
+                    )
 
-                    candidate_prediction = self.predictor(candidate_crop)
-                    # print('candidate prediction: ', candidate_prediction)
-                    vis_frame = process_predictions(
-                        candidate_crop, candidate_prediction)
-
-                    # cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-                    # cv2.imshow(WINDOW_NAME, vis_frame)
-                    # if cv2.waitKey(0) == 27:
-                    #     break  # esc to quit
-
-                    if len(candidate_prediction['instances']) > 0:
+                    if candidate_prediction is not None:
+                        # found prominent instance
                         counts['candidate_way'] += 1
-
-                        instance = self.set_prominent_instance(
-                            candidate_prediction, prev_center)
-
-                        # transform prediction coordinates to original image
-                        self.transform_prediction(
-                            candidate_prediction, new_origin, orig_img_size)
-
-                        
 
                         # update prediction for next iteration
                         prev_center, prev_size, prev_prediction = self.get_next_data(
@@ -190,87 +178,150 @@ class VisualizationDemo(object):
 
                         yield process_predictions(frame, candidate_prediction)
                     else:
-                        #     prev_prediction = None
+                        # make sure no prominent instance exist by setting empty instance
+                        prediction['instances'] = Instances(frame.size[:2])
 
                         # to enable generator continuation with no prediction instance result
                         yield process_predictions(frame, prediction)
+
                 else:   # haven't seen a ball yet
                     yield process_predictions(frame, prediction)
             print('counts: ', counts)
 
-    def get_box_size(self, box):
+    def get_box_size(self, pred_boxes, with_start=False):
+        np_pred_boxes = pred_boxes.to(self.cpu_device).tensor.numpy()
+
+        pred_box = np_pred_boxes[0]
+
         # change box points to integers
-        x0, y0, x1, y1 = map(lambda real: int(round(real)), prev_box)
+        x0, y0, x1, y1 = map(lambda real: int(round(real)), pred_box)
         assert y1 > y0, "Box y1 is not greater than y0"
         assert x1 > x0, "Box x1 is not greater than x0"
 
         h, w = y1 - y0, x1 - x0
 
-        return h, w
+        if with_start:
+            return h, w
+        else
+            return h, w, y0, x0
 
     def get_next_data(self, prediction):
         instance = prediction['instances']
         assert len(instance) == 1
-        return instance.pred_boxes[0].get_centers(), self.get_box_size(instance.pred_boxes[0]), prediction
+
+        
+
+        return instance.pred_boxes[0].get_centers(), self.get_box_size(instance.pred_boxes), prediction
 
     def normalize_box_size(self, prev_size, instance):
         prev_h, prev_w = prev_size
-        h, w = self.get_box_size(instance.pred_boxes[0])
+        h, w = self.get_box_size(instance.pred_boxes)
 
         score = instance.pred_scores[0]
 
+        # new box size is affected by previous size based on its current score
         new_h = prev_h * (1 - score) + h * score
         new_w = prev_w * (1 - score) + w * score
 
         return new_h, new_w
 
-    def set_prominent_instance(self, prediction, prev_center, prev_size, alone_score=0.5):
+    def get_near_instance(self, pred_instances, prev_center, prev_size):
         instances_len = len(pred_instances)
+
+        min_dist = torch.dist(
+            prev_center, pred_instances.pred_boxes[0].get_centers())
+        min_index = 0
+        for i in range(1, instances_len):
+            dist = torch.dist(
+                prev_center, pred_instances.pred_boxes[i].get_centers())
+            if dist < min_dist:
+                min_dist = dist
+                min_index = i
+
+        h, w = prev_size
+        # if min_dist is out of twice circumscribing circle of previous rectangle don't consider vicinity
+        if min_dist > 2*max(h, w):
+            # if instance too far, no instance found
+            return None
+        else:
+            # instances only support slicing not indexing, weird
+            return pred_instances[min_index:min_index+1]
+
+    def get_score_instance(self, pred_instances, thresh_score):
+        instances_len = len(pred_instances)
+
+        max_score = pred_instances.scores[0]
+        max_index = 0
+        for i in range(1, instances_len):
+            if max_score < pred_instances.scores[i]:
+                max_score = pred_instances.scores[i]
+                max_index = i
+
+        # since no previous prediction can support it with vicinity, expect a high score(threshold score)
+        if max_score > thresh_score:
+            # instances only support slicing not indexing, weird
+            return pred_instances[max_index:max_index+1]
+        else:
+            # if score is too low from threshold score, no instance found
+            return None
+
+    def get_prominent_instance(self, prediction, prev_center, prev_size, thresh_score=0.5):
         pred_instances = prediction['instances']
 
+        if len(pred_instances) == 0:
+            return None
+
+        # if no previous center found, take the box with the highest confidence score
         if prev_center is None:
-            max_score = pred_instances.scores[0]
-            max_index = 0
-            for i in range(1, instances_len):
-                if max_score < pred_instances.scores[i]:
-                    max_score = pred_instances.scores[i]
-                    max_index = i
-
-            # if no previous prediction can support it with vicinity, expect a high score
-            if max_score > alone_score:
-                # instances only support slicing not indexing, weird
-                prominent_instance = pred_instances[max_index:max_index+1]
-            else:
-                # empty instances
-                prominent_instance = pred_instances[instances_len+1:]
+            prominent_instance = self.get_score_instance(
+                pred_instances, thresh_score)
         else:
-            min_dist = torch.dist(
-                prev_center, pred_instances.pred_boxes[0].get_centers())
-            min_index = 0
-            for i in range(1, instances_len):
-                dist = torch.dist(
-                    prev_center, pred_instances.pred_boxes[i].get_centers())
-                if dist < min_dist:
-                    min_dist = dist
-                    min_index = i
-
-            assert prev_size is not None  # if prev_center is not None, then so prev_size too
-            h, w = prev_size
-            # if min_dist is out of twice circumscribing circle of previous rectangle don't consider vicinity
-            if min_dist > 2*max(h, w):
-                # empty instances
-                prominent_instance = pred_instances[instances_len+1:]
-            else:
-                # instances only support slicing not indexing, weird
-                prominent_instance = pred_instances[min_index:min_index+1]
-
-        # update prediction instances
-        prediction['instances'] = prominent_instance
+            prominent_instance = self.get_near_instance(
+                pred_instances, prev_center, prev_size)
+            if prominent_instance is None:
+                # if no near instance is found, try to find an instance with attracting score
+                prominent_instance = self.get_score_instance(
+                    pred_instances, thresh_score)
 
         return prominent_instance
 
-    def get_dist(point1, point2):
-        return torch.dist(point1, point2)
+    def setProminentInstanceByProposal(self, img, prev_instances, prev_center, prev_size, thresh_score=0.5, scale_start=10, scale_diff=5, scale_end=40):
+        orig_img_size = img.shape[:2]
+
+        for percent in range(scale_start, scale_end, scale_diff):
+            scale = percent / 100
+            candidate_crop, new_origin = self.getBallProposal(
+                img, prev_instances, scale)
+
+            candidate_prediction = self.predictor(candidate_crop)
+
+            # Visualize croped frame and its prediction
+            # vis_frame = process_predictions(
+            #             candidate_crop, candidate_prediction)
+            # cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            # cv2.imshow(WINDOW_NAME, vis_frame)
+            # if cv2.waitKey(0) == 27:
+            #     break  # esc to quit
+
+            # continue if no prediction instance found
+            if len(candidate_prediction['instances']) == 0:
+                continue
+
+            # transform prediction coordinates to original image
+            self.transform_prediction(
+                candidate_prediction, new_origin, orig_img_size)
+
+            prominent_instance = self.get_prominent_instance(
+                candidate_prediction, prev_center, prev_size, thresh_score)
+            if prominent_instance is None:
+                # no prominent instance found continue searching
+                continue
+            else:
+                # if satisfying prominent instance found break loop and return
+                candidate_prediction['instances'] = prominent_instance
+                return candidate_prediction
+
+        return None
 
     def getBallProposal(self, img, prev_instances, scale=0.1):
         y_widen = scale
@@ -278,30 +329,27 @@ class VisualizationDemo(object):
 
         prev_boxes = prev_instances.pred_boxes
         img_h, img_w = prev_instances.image_size
-        np_prev_boxes = prev_boxes.to(self.cpu_device).tensor.numpy()
 
-        prev_box = np_prev_boxes[0]
-
-        h, w = self.get_box_size(prev_box)
+        h, w, y0, x0 = self.get_box_size(prev_boxes, with_start=True)
 
         h_fract = int(round(y_widen * img_h))
         w_fract = int(round(x_widen * img_w))
 
         y0 = y0 - h_fract if y0 > h_fract else 0
         x0 = x0 - w_fract if x0 > w_fract else 0
-        h = h + 2*h_fract   # 2* because to compensate y0 - h_fract effect
-        w = w + 2*w_fract
+        new_h = h + 2*h_fract   # 2* because to compensate y0 - h_fract effect
+        new_w = w + 2*w_fract
 
         # ! don't need to check if w and h get out of image limit since python indexing is safe
         # check if w and h doesnot get out of image limit
-        # h = img_h - y0 if h > img_h - y0 else h
-        # w = img_w - x0 if w > img_w - x0 else w
+        # new_h = img_h - y0 if new_h > img_h - y0 else new_h
+        # new_w = img_w - x0 if new_w > img_w - x0 else new_w
 
         if len(img.shape) <= 3:
-            return img[y0: y0 + h, x0: x0 + w], (x0, y0)
+            return img[y0: y0 + new_h, x0: x0 + new_w], (x0, y0)
         else:
             return img[
-                ..., y0: y0 + h, x0: x0 + w, :
+                ..., y0: y0 + new_h, x0: x0 + new_w, :
             ], (x0, y0)
 
     def transform_prediction(self, pred, origin, orig_img_size):
