@@ -2,7 +2,7 @@
 import atexit
 import bisect
 import multiprocessing as mp
-from collections import deque
+from collections import deque, defaultdict
 import cv2
 import torch
 
@@ -11,6 +11,7 @@ from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
 from detectron2.utils.visualizer import ColorMode, Visualizer
 from detectron2.structures import Instances
+
 
 WINDOW_NAME = 'predictor test'
 
@@ -37,6 +38,18 @@ class VisualizationDemo(object):
             self.predictor = AsyncPredictor(cfg, num_gpus=num_gpu)
         else:
             self.predictor = DefaultPredictor(cfg)
+
+        # counter when ball detected for metrics purposes
+        self.counts = {
+            'frames': 0,
+            'total': 0,
+            'score_way': 0,
+            'near_way': 0,
+            'no_near_score_way': 0,
+            'normal_way': 0,
+            'candidate_way': 0,
+            'candidate_way_detailed': defaultdict(int),
+        }
 
     def run_on_image(self, image):
         """
@@ -133,16 +146,11 @@ class VisualizationDemo(object):
                 predictions = self.predictor.get()
                 yield process_predictions(frame, predictions)
         else:
-            counts = {
-                'frames': 0,
-                'normal_way': 0,
-                'candidate_way': 0,
-            }
             prev_prediction = None
             prev_center = None
             prev_size = None
             for frame in frame_gen:
-                counts['frames'] += 1
+                self.counts['frames'] += 1
 
                 # predict in normal way
                 prediction = self.predictor(frame)
@@ -153,7 +161,7 @@ class VisualizationDemo(object):
 
                 if instance is not None:  # found a ball
                     # print("prediction: ", prediction)
-                    counts['normal_way'] += 1
+                    self.counts['normal_way'] += 1
 
                     # set only prominent instance
                     prediction['instances'] = instance
@@ -170,7 +178,7 @@ class VisualizationDemo(object):
 
                     if candidate_prediction is not None:
                         # found prominent instance
-                        counts['candidate_way'] += 1
+                        self.counts['candidate_way'] += 1
 
                         # update prediction for next iteration
                         prev_center, prev_size, prev_prediction = self.get_next_data(
@@ -179,14 +187,22 @@ class VisualizationDemo(object):
                         yield process_predictions(frame, candidate_prediction)
                     else:
                         # make sure no prominent instance exist by setting empty instance
-                        prediction['instances'] = Instances(frame.size[:2])
+                        instances_len = len(prediction['instances'])
+                        empty_instance = prediction['instances'][instances_len:]
+                        prediction['instances'] = empty_instance
 
                         # to enable generator continuation with no prediction instance result
                         yield process_predictions(frame, prediction)
 
                 else:   # haven't seen a ball yet
                     yield process_predictions(frame, prediction)
-            print('counts: ', counts)
+
+            self.counts['total'] = self.counts['normal_way'] + \
+                self.counts['candidate_way']
+            import json
+            print('counts: \n', json.dumps(self.counts, indent=2))
+            assert self.counts['total'] == self.counts['score_way'] + self.counts['near_way'] + \
+                self.counts['no_near_score_way'], "total detected frame number is not matching"
 
     def get_box_size(self, pred_boxes, with_start=False):
         np_pred_boxes = pred_boxes.to(self.cpu_device).tensor.numpy()
@@ -201,15 +217,13 @@ class VisualizationDemo(object):
         h, w = y1 - y0, x1 - x0
 
         if with_start:
-            return h, w
-        else
             return h, w, y0, x0
+        else:
+            return h, w
 
     def get_next_data(self, prediction):
         instance = prediction['instances']
         assert len(instance) == 1
-
-        
 
         return instance.pred_boxes[0].get_centers(), self.get_box_size(instance.pred_boxes), prediction
 
@@ -275,6 +289,10 @@ class VisualizationDemo(object):
         if prev_center is None:
             prominent_instance = self.get_score_instance(
                 pred_instances, thresh_score)
+
+            # TODO: metrics purpose counting(to be removed)
+            if prominent_instance is not None:
+                self.counts['score_way'] += 1
         else:
             prominent_instance = self.get_near_instance(
                 pred_instances, prev_center, prev_size)
@@ -282,6 +300,13 @@ class VisualizationDemo(object):
                 # if no near instance is found, try to find an instance with attracting score
                 prominent_instance = self.get_score_instance(
                     pred_instances, thresh_score)
+
+                # TODO: metrics purpose counting(to be removed)
+                if prominent_instance is not None:
+                    self.counts['no_near_score_way'] += 1
+            else:
+                # TODO: metrics purpose counting(to be removed)
+                self.counts['near_way'] += 1
 
         return prominent_instance
 
@@ -317,6 +342,9 @@ class VisualizationDemo(object):
                 # no prominent instance found continue searching
                 continue
             else:
+                # TODO: metrics purpose counting(to be removed)
+                self.counts['candidate_way_detailed'][scale] += 1
+
                 # if satisfying prominent instance found break loop and return
                 candidate_prediction['instances'] = prominent_instance
                 return candidate_prediction
