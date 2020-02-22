@@ -28,10 +28,12 @@ def getMetrics(file_name, keys):
 
         return row
 
+
 def get_metric_folder_name(file_name):
     metric_folder, _ = os.path.split(file_name)
     _, model_folder_name = os.path.split(metric_folder)
     return model_folder_name
+
 
 if __name__ == "__main__":
     args = get_parser().parse_args()
