@@ -5,6 +5,9 @@ import multiprocessing as mp
 from collections import deque, defaultdict
 import cv2
 import torch
+import json
+import os
+
 
 from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
@@ -50,6 +53,11 @@ class VisualizationDemo(object):
             'candidate_way': 0,
             'candidate_way_detailed': defaultdict(int),
         }
+
+        self.json_dicts = []
+
+        self.json_filename = None
+        self.json_output = None
 
     def run_on_image(self, image):
         """
@@ -114,6 +122,10 @@ class VisualizationDemo(object):
                 )
             elif "instances" in predictions:
                 predictions = predictions["instances"].to(self.cpu_device)
+
+                # append on json dict
+                self.json_dicts.append(self.get_box_dict(predictions))
+
                 vis_frame = video_visualizer.draw_instance_predictions(
                     frame, predictions)
             elif "sem_seg" in predictions:
@@ -199,10 +211,31 @@ class VisualizationDemo(object):
 
             self.counts['total'] = self.counts['normal_way'] + \
                 self.counts['candidate_way']
-            import json
             print('counts: \n', json.dumps(self.counts, indent=2))
+
+            # write final json result to file
+            with open(os.path.join(self.json_output,'jsons', f'{self.json_filename}.json'), 'w') as json_file:
+                json.dump(self.json_dicts, json_file)
+
             assert self.counts['total'] == self.counts['score_way'] + self.counts['near_way'] + \
                 self.counts['no_near_score_way'], "total detected frame number is not matching"
+
+    def get_box_dict(self, instances):
+        if len(instances) != 1:
+            return None
+
+        # assume processing is finalized and final best box only exists
+        best_box = instances.pred_boxes[0]
+        x0, y0, x1, y1 = best_box.tensor[0]
+        x_center, y_center = best_box.get_centers()[0]
+        return {
+            'xc': x_center.item(),
+            'yc': y_center.item(),
+            'x0': x0.item(),
+            'y0': y0.item(),
+            'x1': x1.item(),
+            'y1': y1.item(),
+        }
 
     def get_box_size(self, pred_boxes, with_start=False):
         np_pred_boxes = pred_boxes.to(self.cpu_device).tensor.numpy()

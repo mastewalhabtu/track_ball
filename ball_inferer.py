@@ -176,6 +176,16 @@ if __name__ == "__main__":
         num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
         basename = os.path.basename(args.video_input)
 
+        # set filename in demo
+        folder_path, file_name = os.path.split(args.video_input)
+        split_filename, ext = os.path.splitext(file_name)
+        demo.json_filename = split_filename
+        if os.path.isdir(args.output):
+            demo.json_output = args.output  
+        else:
+            output_folder_path, file_name = os.path.split(args.output)
+            demo.json_output = output_folder_path
+
         if args.output:
             if os.path.isdir(args.output):
                 output_fname = os.path.join(args.output, basename)
